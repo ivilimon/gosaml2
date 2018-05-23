@@ -7,14 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"hash"
 	"strings"
+	"crypto"
 )
 
 //EncryptedKey contains the decryption key data from the saml2 core and xmlenc
@@ -101,40 +99,45 @@ func (ek *EncryptedKey) DecryptSymmetricKey(cert *tls.Certificate) (cipher.Block
 		return nil, err
 	}
 
-	switch pk := cert.PrivateKey.(type) {
-	case *rsa.PrivateKey:
-		var h hash.Hash
-
-		switch ek.EncryptionMethod.DigestMethod.Algorithm {
-		case "", MethodSHA1:
-			h = sha1.New() // default
-		case MethodSHA256:
-			h = sha256.New()
-		case MethodSHA512:
-			h = sha512.New()
-		default:
-			return nil, fmt.Errorf("unsupported digest algorithm: %v",
-				ek.EncryptionMethod.DigestMethod.Algorithm)
-		}
-
-		switch ek.EncryptionMethod.Algorithm {
-		case "":
-			return nil, fmt.Errorf("missing encryption algorithm")
-		case MethodRSAOAEP, MethodRSAOAEP2:
-			pt, err := rsa.DecryptOAEP(h, rand.Reader, pk, cipherText, nil)
-			if err != nil {
-				return nil, fmt.Errorf("rsa internal error: %v", err)
-			}
-
-			b, err := aes.NewCipher(pt)
-			if err != nil {
-				return nil, err
-			}
-
-			return b, nil
-		default:
-			return nil, fmt.Errorf("unsupported encryption algorithm: %s", ek.EncryptionMethod.Algorithm)
-		}
+	var h crypto.Hash
+	switch ek.EncryptionMethod.DigestMethod.Algorithm {
+	case "", MethodSHA1:
+		h = crypto.SHA1 // default
+	case MethodSHA256:
+		h = crypto.SHA256
+	case MethodSHA512:
+		h = crypto.SHA512
+	default:
+		return nil, fmt.Errorf("unsupported digest algorithm: %v",
+			ek.EncryptionMethod.DigestMethod.Algorithm)
 	}
-	return nil, fmt.Errorf("no cipher for decoding symmetric key")
+
+	var opts crypto.DecrypterOpts
+	switch ek.EncryptionMethod.Algorithm {
+	case "":
+		return nil, fmt.Errorf("missing encryption algorithm")
+	case MethodRSAOAEP, MethodRSAOAEP2:
+		opts = &rsa.OAEPOptions{
+			Hash:  h,
+			Label: nil,
+		}
+	default:
+		return nil, fmt.Errorf("unsupported encryption algorithm: %s", ek.EncryptionMethod.Algorithm)
+	}
+
+	pk, ok := cert.PrivateKey.(crypto.Decrypter)
+	if !ok {
+		return nil, fmt.Errorf("no cipher for decoding symmetric key")
+	}
+
+	pt, err := pk.Decrypt(rand.Reader, cipherText, opts)
+	if err != nil {
+		return nil, fmt.Errorf("rsa internal error: %v", err)
+	}
+
+	b, err := aes.NewCipher(pt)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
 }
